@@ -1,4 +1,4 @@
-import json
+import base64
 import re
 from typing import Dict, List, Optional
 from urllib.parse import quote
@@ -44,6 +44,16 @@ TEAM_PATTERNS = [
     r"played for the ([A-Z][A-Za-z0-9&.\- ]+?)(?:,|\.| and )",
     r"is the ([A-Za-z0-9&.\- ]+?) at ([A-Z][A-Za-z0-9&.\- ]+?)(?:,|\.|$)",
 ]
+
+PLACEHOLDER_SVG = """
+<div style="display:flex;justify-content:center;align-items:center;height:300px;">
+  <svg width="160" height="160" viewBox="0 0 160 160" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="80" cy="80" r="80" fill="#d1d5db"/>
+    <circle cx="80" cy="58" r="30" fill="#9ca3af"/>
+    <ellipse cx="80" cy="136" rx="50" ry="34" fill="#9ca3af"/>
+  </svg>
+</div>
+"""
 
 def normalize_text(value) -> str:
     return "" if pd.isna(value) else str(value).strip()
@@ -118,11 +128,36 @@ def wiki_search(name: str, sport_hint: str, type_guess: str) -> Dict:
         if r2.status_code != 200:
             return {"title": title}
         s = r2.json()
+
+        # Try thumbnail first, then originalimage
+        image_url = (s.get("thumbnail") or {}).get("source", "") or (s.get("originalimage") or {}).get("source", "")
+
+        # If still no image, try the media-list endpoint
+        if not image_url:
+            try:
+                media_url = f"https://en.wikipedia.org/api/rest_v1/page/media-list/{encoded_title}"
+                r3 = requests.get(media_url, timeout=10)
+                if r3.status_code == 200:
+                    items = r3.json().get("items", [])
+                    for item in items:
+                        if item.get("type") == "image":
+                            title_lower = (item.get("title") or "").lower()
+                            if any(skip in title_lower for skip in ["flag","logo","icon","map","seal","shield","crest","silhouette"]):
+                                continue
+                            srcset = item.get("srcset", [])
+                            if srcset:
+                                src = srcset[-1].get("src", "")
+                                if src:
+                                    image_url = "https:" + src if src.startswith("//") else src
+                                    break
+            except Exception:
+                pass
+
         return {
             "title": s.get("title", title),
             "description": s.get("description", ""),
             "extract": s.get("extract", ""),
-            "image_url": (s.get("thumbnail") or {}).get("source", "") or (s.get("originalimage") or {}).get("source", ""),
+            "image_url": image_url,
             "content_urls": s.get("content_urls", {}),
         }
     except Exception:
@@ -199,17 +234,35 @@ def enrich_person(row: Dict) -> Dict:
         "entity_type": type_guess,
     }
 
+@st.cache_data(ttl=24 * 60 * 60)
+def fetch_image_bytes(url: str) -> Optional[bytes]:
+    if not url:
+        return None
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "image/jpeg,image/png,image/webp,image/*;q=0.9,*/*;q=0.1",
+        "Referer": "https://en.wikipedia.org/",
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        if r.status_code != 200:
+            return None
+        data = r.content
+        if not data or len(data) < 200:
+            return None
+        return data
+    except Exception:
+        return None
+
 def show_image(person: Dict):
     url = person.get("image_url", "")
-    if not url:
-        st.caption("No headshot found.")
-        return
-    st.markdown(
-        f'<div style="width:100%; display:flex; justify-content:center;">'
-        f'<img src="{url}" style="max-width:100%; max-height:420px; height:auto; border-radius:12px;" '
-        f'onerror="this.style.display=\'none\'" /></div>',
-        unsafe_allow_html=True,
-    )
+    if url:
+        img_bytes = fetch_image_bytes(url)
+        if img_bytes:
+            st.image(img_bytes, use_container_width=True)
+            return
+    st.markdown(PLACEHOLDER_SVG, unsafe_allow_html=True)
+    st.caption("No Wikipedia photo — add image_url_override in CSV to add a headshot.")
 
 def init_state():
     st.session_state.setdefault("mode", "Quiz")
@@ -263,7 +316,7 @@ with st.sidebar:
     mode = st.radio("Mode", options=["Quiz", "Flash", "Reveal"], index=["Quiz","Flash","Reveal"].index(st.session_state.mode))
     st.session_state.mode = mode
     reshuffle = st.button("Reshuffle order")
-    st.caption("Tip: fill any *_override columns in the CSV to manually correct titles, orgs, positions, or images.")
+    st.caption("Tip: fill image_url_override in the CSV to manually add headshots.")
 
 view = df.copy()
 if selected_types:
