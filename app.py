@@ -1,5 +1,3 @@
-import base64
-import io
 import json
 import re
 from typing import Dict, List, Optional
@@ -85,7 +83,6 @@ def wiki_search(name: str, sport_hint: str, type_guess: str) -> Dict:
         if not results:
             return {}
 
-        # basic scoring
         best = None
         best_score = -999
         hint_terms = SPORT_TERMS.get(sport_hint, [])
@@ -202,65 +199,17 @@ def enrich_person(row: Dict) -> Dict:
         "entity_type": type_guess,
     }
 
-def sniff_mime(data: bytes) -> str:
-    if not data or len(data) < 12:
-        return "application/octet-stream"
-    head = data[:32]
-    if head.startswith(b"\xFF\xD8\xFF"):
-        return "image/jpeg"
-    if head.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if head.startswith(b"GIF87a") or head.startswith(b"GIF89a"):
-        return "image/gif"
-    if head[0:4] == b"RIFF" and head[8:12] == b"WEBP":
-        return "image/webp"
-    if b"ftyp" in head:
-        if b"ftypavif" in head or b"ftypavis" in head:
-            return "image/avif"
-        if b"ftypheic" in head or b"ftypheix" in head or b"ftypheif" in head or b"ftypmif1" in head:
-            return "image/heif"
-    if head.lstrip().startswith(b"<svg"):
-        return "image/svg+xml"
-    return "application/octet-stream"
-
-def fetch_image_bytes(url: str) -> Optional[bytes]:
-    if not url:
-        return None
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "image/jpeg,image/png,image/webp,image/avif,image/*;q=0.9,*/*;q=0.1",
-        "Referer": "https://en.wikipedia.org/",
-    }
-    try:
-        r = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
-        if r.status_code != 200:
-            return None
-        data = r.content
-        if not data or len(data) < 100:
-            return None
-        return data
-    except Exception:
-        return None
-
-def render_image_bytes(data: bytes):
-    mime = sniff_mime(data)
-    b64 = base64.b64encode(data).decode("utf-8")
-    html = f"""
-    <div style="width:100%; display:flex; justify-content:center;">
-      <img src="data:{mime};base64,{b64}" style="max-width:100%; max-height:420px; height:auto; border-radius:12px;" />
-    </div>
-    """
-    st.components.v1.html(html, height=440)
-
 def show_image(person: Dict):
-    img = fetch_image_bytes(person.get("image_url", "")) if person.get("image_url") else None
-    if not isinstance(img, (bytes, bytearray)) or len(img) < 100:
+    url = person.get("image_url", "")
+    if not url:
         st.caption("No headshot found.")
         return
-    try:
-        render_image_bytes(bytes(img))
-    except Exception:
-        st.caption("Headshot failed to render.")
+    st.markdown(
+        f'<div style="width:100%; display:flex; justify-content:center;">'
+        f'<img src="{url}" style="max-width:100%; max-height:420px; height:auto; border-radius:12px;" '
+        f'onerror="this.style.display=\'none\'" /></div>',
+        unsafe_allow_html=True,
+    )
 
 def init_state():
     st.session_state.setdefault("mode", "Quiz")
